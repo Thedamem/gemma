@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemma Chat</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f0f2f5; }
+        .container { background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        
+        /* Экраны */
+        #setup-screen, #chat-screen { display: none; }
+        #setup-screen.active, #chat-screen.active { display: block; }
+        
+        /* Формы и инпуты */
+        input[type="password"], select, textarea { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; width: 100%; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        /* Чат */
+        #chat-box { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 15px; margin-bottom: 15px; border-radius: 5px; background: #fafafa; }
+        .message { margin-bottom: 15px; padding: 10px; border-radius: 8px; max-width: 85%; word-wrap: break-word; }
+        .message.user { background: #e3f2fd; margin-left: auto; color: #000; border-bottom-right-radius: 0; }
+        .message.model { background: #fff; border: 1px solid #e0e0e0; margin-right: auto; border-bottom-left-radius: 0; }
+        .error { color: red; font-size: 14px; text-align: center; }
+        .loading { text-align: center; font-style: italic; color: #666; }
+        
+        /* Верхняя панель чата */
+        .chat-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px;}
+        .chat-header button { width: auto; background: #dc3545; }
+        .chat-header button:hover { background: #c82333; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Gemma Chat</h1>
+
+    <!-- Экран авторизации -->
+    <div id="setup-screen" class="active">
+        <p>Введите ваш API-ключ от Google AI Studio. Он будет сохранен в куки вашего браузера.</p>
+        <input type="password" id="api-key-input" placeholder="AIzaSy...">
+        <button id="connect-btn" onclick="connect()">Подключиться и найти модели</button>
+        <p id="setup-error" class="error"></p>
+    </div>
+
+    <!-- Экран чата -->
+    <div id="chat-screen">
+        <div class="chat-header">
+            <select id="model-select"></select>
+            <button onclick="logout()">Выйти (Удалить ключ)</button>
+        </div>
+        
+        <div id="chat-box"></div>
+        
+        <div style="display: flex; gap: 10px;">
+            <textarea id="message-input" rows="2" placeholder="Введите сообщение..."></textarea>
+            <button id="send-btn" onclick="sendMessage()" style="width: 100px;">Отправить</button>
+        </div>
+        <p id="chat-error" class="error"></p>
+    </div>
+</div>
+
+<script>
+    const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+    let currentApiKey = '';
+    let chatHistory = []; // История текущего диалога для API
+
+    // --- Работа с Cookie ---
+    function setCookie(name, value, days) {
+        let expires = "";
+        if (days) {
+            let date = new Date();
+            date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+            expires = "; expires=" + date.toUTCString();
+        }
+        document.cookie = name + "=" + (value || "")  + expires + "; path=/; SameSite=Strict";
+    }
+
+    function getCookie(name) {
+        let nameEQ = name + "=";
+        let ca = document.cookie.split(';');
+        for(let i=0; i < ca.length; i++) {
+            let c = ca[i];
+            while (c.charAt(0)==' ') c = c.substring(1,c.length);
+            if (c.indexOf(nameEQ) == 0) return c.substring(nameEQ.length,c.length);
+        }
+        return null;
+    }
+
+    // --- Логика Инициализации ---
+    window.onload = () => {
+        const savedKey = getCookie('gemma_api_key');
+        if (savedKey) {
+            document.getElementById('api-key-input').value = savedKey;
+            connect(); // Автоматически пытаемся войти, если есть куки
+        }
+    };
+
+    function logout() {
+        setCookie('gemma_api_key', '', -1); // Удаляем куку
+        document.getElementById('setup-screen').classList.add('active');
+        document.getElementById('chat-screen').classList.remove('active');
+        document.getElementById('api-key-input').value = '';
+        chatHistory = [];
+        document.getElementById('chat-box').innerHTML = '';
+    }
+
+    // --- Подключение и Парсинг Моделей ---
+    async function connect() {
+        const keyInput = document.getElementById('api-key-input').value.trim();
+        const errorEl = document.getElementById('setup-error');
+        const btn = document.getElementById('connect-btn');
+        
+        if (!keyInput) {
+            errorEl.innerText = "Пожалуйста, введите API ключ.";
+            return;
+        }
+
+        errorEl.innerText = "";
+        btn.disabled = true;
+        btn.innerText = "Подключение...";
+
+        try {
+            // Запрашиваем список всех моделей
+            const response = await fetch(`${API_BASE}/models?key=${keyInput}`);
+            
+            if (!response.ok) {
+                throw new Error("Неверный API ключ или ошибка сети.");
+            }
+            
+            const data = await response.json();
+            
+            // Фильтруем: оставляем только Gemma и те, которые умеют генерировать контент
+            const gemmaModels = data.models.filter(m => 
+                m.name.toLowerCase().includes('gemma') && 
+                m.supportedGenerationMethods.includes('generateContent')
+            );
+
+            if (gemmaModels.length === 0) {
+                throw new Error("Доступные модели Gemma не найдены по этому ключу.");
+            }
+
+            // Заполняем Select
+            const selectEl = document.getElementById('model-select');
+            selectEl.innerHTML = '';
+            gemmaModels.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.name; // Формат: models/gemma-2-9b-it
+                option.innerText = model.displayName || model.name.split('/')[1];
+                selectEl.appendChild(option);
+            });
+
+            // Успех: сохраняем ключ в куки на 30 дней и переключаем экран
+            currentApiKey = keyInput;
+            setCookie('gemma_api_key', currentApiKey, 30);
+            
+            document.getElementById('setup-screen').classList.remove('active');
+            document.getElementById('chat-screen').classList.add('active');
+            addMessageToChat('Система', 'Подключение успешно! Выберите модель и начните чат.', 'model');
+
+        } catch (err) {
+            errorEl.innerText = err.message;
+        } finally {
+            btn.disabled = false;
+            btn.innerText = "Подключиться и найти модели";
+        }
+    }
+
+    // --- Логика Чата ---
+    async function sendMessage() {
+        const inputEl = document.getElementById('message-input');
+        const text = inputEl.value.trim();
+        const errorEl = document.getElementById('chat-error');
+        const sendBtn = document.getElementById('send-btn');
+        const modelName = document.getElementById('model-select').value;
+
+        if (!text) return;
+
+        errorEl.innerText = "";
+        inputEl.value = "";
+        sendBtn.disabled = true;
+
+        // Добавляем сообщение пользователя в UI и в историю
+        addMessageToChat('Вы', text, 'user');
+        chatHistory.push({ role: "user", parts: [{ text: text }] });
+
+        // Добавляем индикатор загрузки
+        const loadingId = addMessageToChat('Gemma', 'Печатает...', 'model', true);
+
+        try {
+            const response = await fetch(`${API_BASE}/${modelName}:generateContent?key=${currentApiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: chatHistory })
+            });
+
+            const data = await response.json();
+
+            // Удаляем индикатор загрузки
+            document.getElementById(loadingId).remove();
+
+            if (!response.ok) {
+                // Обработка ошибок (например, исчерпан лимит - квота)
+                throw new Error(data.error?.message || "Ошибка генерации");
+            }
+
+            // Извлекаем текст ответа
+            const replyText = data.candidates[0].content.parts[0].text;
+            
+            // Добавляем ответ модели в UI и историю
+            addMessageToChat('Gemma', replyText, 'model');
+            chatHistory.push({ role: "model", parts: [{ text: replyText }] });
+
+        } catch (err) {
+            document.getElementById(loadingId)?.remove();
+            errorEl.innerText = "Ошибка: " + err.message;
+            // Удаляем наше последнее сообщение из истории, так как оно не прошло
+            chatHistory.pop();
+        } finally {
+            sendBtn.disabled = false;
+            inputEl.focus();
+        }
+    }
+
+    // Функция отрисовки сообщений
+    function addMessageToChat(sender, text, type, isLoading = false) {
+        const chatBox = document.getElementById('chat-box');
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `message ${type}`;
+        if (isLoading) {
+            msgDiv.classList.add('loading');
+            msgDiv.id = 'loading-' + Date.now();
+        }
+        
+        // Превращаем переносы строк в <br>
+        const formattedText = text.replace(/\n/g, '<br>');
+        msgDiv.innerHTML = `<strong>${sender}:</strong><br>${formattedText}`;
+        
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight; // Скролл вниз
+        
+        return msgDiv.id;
+    }
+
+    // Отправка по Enter (без Shift)
+    document.getElementById('message-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+</script>
+
+</body>
+</html>
